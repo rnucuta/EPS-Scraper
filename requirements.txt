@@ -1,1 +1,9 @@
-sec_parser
+transformers==4.44.2
+torch==2.4.0
+tqdm==4.66.5
+sec-parser==0.58.1
+pandas==2.2.2
+fuzzywuzzy==0.18.0
+python-Levenshtein==0.25.1
+scikit-learn==1.5.1
+nltk==3.9.1

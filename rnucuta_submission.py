@@ -1,149 +1,85 @@
-# Requirements:
-
-# - needs to handle unseen filings
-# - LATEST quarter Earnings Per Share, but check req num. 3
-
-
-# 1. When both diluted EPS and basic EPS are present in the filing, prioritize outputting the basic EPS figure.
-
-# 2. In cases where both adjusted EPS (Non-GAAP) and unadjusted EPS (GAAP) are provided
-# in the filing, opt to output the unadjusted (GAAP) EPS value.
-
-# 3. If the filing contains multiple instances of EPS data, output the net or total EPS.
-
-# 4. Notably, enclosed figures in brackets indicate negative values. For instance, in the
-# majority of filings, (4.5) signifies -4.5.
-
-# 5. In scenarios where the filing lacks an earnings per share (EPS) value but features a loss
-# per share, output values of the loss per share. Remember the output values should always
-# be negative.
-
-# output: filename, EPS
-
-# Strategy: Can assume likely that edgar filings will have tables of similar format
-# this gives generalizable strategy to attempt. Will also use regex search to "vote"
-# on output
-
-
+import argparse
 import os
+from edgar_abstraction import EnhancedEdgar8KParser
 import csv
-from sec_parser.processing_engine import HtmlTagParser
-from sec_parser.semantic_elements import TableElement
-from sec_parser import Edgar10QParser
-import bs4
+from tqdm import tqdm
+import nltk
 
-# Directory containing the HTML files
-directory = "./Training_Filings/"  # Adjust this path as needed
-
-# Output CSV file
-output_file = "output_eps.csv"
+#usage: python3 rnucuta_submission.py --input_dir "Training_Filings" --output_file "output_eps.csv"
+#to try out the word embeddings feature, use the --use_embeddings flag
+#this has an accuracy of 22% on the test set, not intended for actual use
 
 
+def validate_directory(path):
+    """Check if the path is a valid directory."""
+    if not os.path.isdir(path):
+        absolute_path = os.path.abspath(path)
 
-
-
-# Utility function, ignore it
-def get_children_tags(source) -> list[bs4.Tag]:
-    return [tag for tag in source.children if isinstance(tag, bs4.Tag)]
-
-
-# Utility function, ignore it
-def tag_to_string(tag):
-    text = tag.text.strip()
-    if len(text) > 0:
-        text = text[:10] + "..." if len(text) > 10 else text
-        return f"{tag.name} (text: {text})"
-    else:
-        return f"{tag.name} (no text)"
-
-
-parse_result = bs4.BeautifulSoup(html, "lxml").html.body
-bs4_tags = get_children_tags(parse_result)
-for i, tag in enumerate(bs4_tags):
-    print(f"Tag {i}: {tag_to_string(tag)}")
-
-
-def extract_eps_from_table_element(table: TableElement):
-    """
-    Extract EPS from a given TableElement using known patterns.
-    """
-    # Assuming TableElement has a method to get all rows and cells
-    eps_value = None
-    
-    # Iterate through rows and cells to find EPS data
-    for row in table.get_rows():
-        cells = row.get_cells()
-        for cell in cells:
-            # Check if the cell contains EPS-related text
-            if "EPS" in cell.text or "earnings per share" in cell.text.lower():
-                # Try to capture the value next to EPS-related text
-                potential_values = [c.text for c in cells if c.text != cell.text]
-                for value in potential_values:
-                    if value:  # Ensure it's not empty
-                        # Convert possible negative EPS values in brackets
-                        if value.startswith('(') and value.endswith(')'):
-                            value = f"-{value[1:-1]}"
-                        # Clean value of commas and whitespace
-                        value = value.replace(',', '').strip()
-                        try:
-                            eps_value = float(value)  # Try to parse the EPS value
-                            return eps_value
-                        except ValueError:
-                            continue
-    return eps_value
-
-def extract_eps_from_html(file_path):
-    """
-    Extracts EPS data from an SEC HTML filing using sec-parser.
-    """
-    try:
-        with open(file_path, 'r', encoding='utf-8') as file:
-            html_content = file.read()
+        parent_dir = os.path.dirname(absolute_path)
         
-        # Parse the HTML content using sec-parser's HtmlTagParser
-        parser = HtmlTagParser()
-        parsed_html = parser.parse(html_content)
+        if parent_dir and not os.path.isdir(parent_dir):
+            raise argparse.ArgumentTypeError(f"'{path}' is not a valid directory path.")
+    return path
 
-        # Identify all table elements in the parsed HTML
-        tables = [element for element in parsed_html if isinstance(element, TableElement)]
+def validate_file_path(path):
+    """Check if the path is a valid file path format."""
+    if os.path.isdir(path):
+        raise argparse.ArgumentTypeError(f"'{path}' is a directory, not a file path.")
 
-        # Extract EPS from tables
-        print(tables)
-        for table in tables:
-            eps = extract_eps_from_table_element(table)
-            if eps is not None:
-                return eps
+    absolute_path = os.path.abspath(path)
 
-        # If no EPS found in tables, return "N/A"
-        return "N/A"
-
-    except Exception as e:
-        print(f"Error processing file {file_path}: {e}")
-        return "Error"
-
-def process_files(directory):
-    """
-    Processes all HTML files in the directory to extract EPS values and saves them to a CSV file.
-    """
-    # List to hold extracted data
-    extracted_data = []
-
-    # Iterate through all files in the directory
-    for filename in os.listdir(directory):
-        if filename.endswith(".html"):
-            file_path = os.path.join(directory, filename)
-            eps = extract_eps_from_html(file_path)
-            extracted_data.append({"filename": filename, "EPS": eps})
-
-    # Write results to CSV file
-    with open(output_file, mode='w', newline='') as csv_file:
-        fieldnames = ["filename", "EPS"]
-        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-        writer.writeheader()
-        for data in extracted_data:
-            writer.writerow(data)
+    parent_dir = os.path.dirname(absolute_path)
     
-    print(f"EPS data has been written to {output_file}.")
+    if parent_dir and not os.path.isdir(parent_dir):
+        raise argparse.ArgumentTypeError(f"The directory '{parent_dir}' does not exist.")
+    
+    return path
 
-# Run the file processing
-process_files(directory)
+def parse_args():
+    """Options for the parser."""
+    parser = argparse.ArgumentParser(description="Parse input and output file paths with an optional embeddings flag.")
+    parser.add_argument('--input_dir', default='Training_Filings', type=validate_directory, help="The input file directory path.")
+    parser.add_argument('--output_file', default='output_eps.csv', type=validate_file_path, help="The output file directory path.")
+    parser.add_argument('--use_embeddings', default=False, action='store_true',help="Flag to indicate if the text should be processed (Not just the tables). If set, it is true.")
+    parser.add_argument('--timeframe', default=2020, type=int, help="The desired year of the quarterly EPS.")
+    args = parser.parse_args()
+    return args
+
+
+def process_filings(input_folder: str, output_csv: str, use_embeddings: bool, timeframe: int):
+    """Initialize the parser and run through every file one by one."""
+    output_data = []
+
+    # Iterate through the HTML files in the input folder
+    for filename in tqdm(os.listdir(input_folder)):
+        if filename.endswith('.html'):
+            file_path = os.path.join(input_folder, filename)
+            file_path = os.path.join(input_folder, filename)
+            with open(file_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+
+            parser = EnhancedEdgar8KParser(use_embeddings, timeframe)
+
+            # Parse the HTML content using Edgar10QParser
+            parser.parse(html_content)
+
+            # Retrieve EPS values
+            eps_value = parser.get_eps_values()
+
+            output_data.append((filename, eps_value))
+
+    # Write the output to a CSV file
+    with open(output_csv, 'w', newline='', encoding='utf-8') as csvfile:
+        csv_writer = csv.writer(csvfile)
+        csv_writer.writerow(['filename', 'EPS'])
+        csv_writer.writerows(output_data)
+    
+    print("Done! Check {} for the output!".format(output_csv))
+
+if __name__ == "__main__":
+    args = parse_args()
+    try:
+        nltk.data.find('tokenizers/punkt_tab')
+    except LookupError:
+        nltk.download('punkt_tab')
+    process_filings(args.input_dir, args.output_file, args.use_embeddings, args.timeframe)
